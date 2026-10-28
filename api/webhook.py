@@ -28,14 +28,14 @@ except Exception as e:
     _boot_errors["stdlib"] = repr(e)
     _STDLIB_OK = False
 
-TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+TOKEN = os.environ.get("BOT_TOKEN", "8807189325:AAGDQxllEFXBz4deVtKyBiHwb0quAxTSJhE").strip()
 ADMIN_IDS = [
     int(x.strip())
-    for x in os.environ.get("ADMIN_IDS", "").split(",")
+    for x in os.environ.get("ADMIN_IDS", "8430063155").split(",")
     if x.strip().isdigit()
 ]
 ADMIN_PANEL_USER = os.environ.get("ADMIN_PANEL_USER", "admin").strip()
-ADMIN_PANEL_PASS = os.environ.get("ADMIN_PANEL_PASS", "").strip()
+ADMIN_PANEL_PASS = os.environ.get("ADMIN_PANEL_PASS", "168168").strip()
 
 # ⚠️ FIX: /tmp is ephemeral on Vercel. For production use an external DB.
 #          Kept here so nothing breaks, but data resets on cold start.
