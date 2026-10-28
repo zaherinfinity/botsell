@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import sqlite3
 import asyncio
@@ -287,6 +288,52 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🆘 <b>Support</b>\n\nDescribe your issue in one message.",
         parse_mode=ParseMode.HTML)
+
+
+# ─────────────────────────────────────────────────────────────
+# Top-up approve / reject
+# ─────────────────────────────────────────────────────────────
+async def _approve_topup(rid, bot):
+    req = await asyncio.to_thread(
+        db_fetchone, "SELECT * FROM topup_requests WHERE id = ?", (rid,))
+    if not req or req["status"] != "pending":
+        return False
+    await asyncio.to_thread(
+        db_execute, "UPDATE topup_requests SET status = 'approved' WHERE id = ?",
+        (rid,))
+    await asyncio.to_thread(
+        db_execute,
+        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+        (req["amount"], req["user_id"]))
+    try:
+        await bot.send_message(
+            chat_id=req["user_id"],
+            text=f"✅ <b>Top‑up approved!</b>\n\n"
+                 f"<b>${req['amount']:.2f}</b> added to your balance.\n"
+                 f"Request: <code>#{rid}</code>",
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    return True
+
+
+async def _reject_topup(rid, bot):
+    req = await asyncio.to_thread(
+        db_fetchone, "SELECT * FROM topup_requests WHERE id = ?", (rid,))
+    if not req or req["status"] != "pending":
+        return False
+    await asyncio.to_thread(
+        db_execute, "UPDATE topup_requests SET status = 'rejected' WHERE id = ?",
+        (rid,))
+    try:
+        await bot.send_message(
+            chat_id=req["user_id"],
+            text=f"❌ <b>Top‑up rejected</b>\n\n"
+                 f"Request <code>#{rid}</code> was rejected.",
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    return True
 
 
 # ─────────────────────────────────────────────────────────────
@@ -632,53 +679,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────
-# Top-up approve / reject helpers (used by bot & web)
-# ─────────────────────────────────────────────────────────────
-async def _approve_topup(rid, bot):
-    req = await asyncio.to_thread(
-        db_fetchone, "SELECT * FROM topup_requests WHERE id = ?", (rid,))
-    if not req or req["status"] != "pending":
-        return False
-    await asyncio.to_thread(
-        db_execute, "UPDATE topup_requests SET status = 'approved' WHERE id = ?",
-        (rid,))
-    await asyncio.to_thread(
-        db_execute,
-        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-        (req["amount"], req["user_id"]))
-    try:
-        await bot.send_message(
-            chat_id=req["user_id"],
-            text=f"✅ <b>Top‑up approved!</b>\n\n"
-                 f"<b>${req['amount']:.2f}</b> added to your balance.\n"
-                 f"Request: <code>#{rid}</code>",
-            parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-    return True
-
-
-async def _reject_topup(rid, bot):
-    req = await asyncio.to_thread(
-        db_fetchone, "SELECT * FROM topup_requests WHERE id = ?", (rid,))
-    if not req or req["status"] != "pending":
-        return False
-    await asyncio.to_thread(
-        db_execute, "UPDATE topup_requests SET status = 'rejected' WHERE id = ?",
-        (rid,))
-    try:
-        await bot.send_message(
-            chat_id=req["user_id"],
-            text=f"❌ <b>Top‑up rejected</b>\n\n"
-                 f"Request <code>#{rid}</code> was rejected.",
-            parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-    return True
-
-
-# ─────────────────────────────────────────────────────────────
-# Bot photo / document handlers (receipts + QR upload)
+# Bot photo / document handlers
 # ─────────────────────────────────────────────────────────────
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await ensure_user(update)
@@ -860,7 +861,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data["new_product_price"] = price
         context.user_data["admin_state"] = "add_product_desc"
-        await update.message.reply_text("Send description (or type 'skip').")
+        await update.message.reply_text("Send description (or type: skip).")
         return
     if state == "add_product_desc":
         name = context.user_data.pop("new_product_name")
@@ -906,52 +907,83 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────
-# Telegram webhook handler
+# Telegram app (lazy, loop-aware)
 # ─────────────────────────────────────────────────────────────
 _application = None
-_lock = asyncio.Lock()
+_application_loop = None
+_lock = None
+
+
+def _get_lock():
+    global _lock
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    if _lock is None or getattr(_lock, "_loop", current) is not current:
+        _lock = asyncio.Lock()
+    return _lock
 
 
 async def get_application():
-    global _application
-    if _application is None:
-        async with _lock:
-            if _application is None:
-                app = Application.builder().token(TOKEN).build()
-                app.add_handler(CommandHandler("start", cmd_start))
-                app.add_handler(CommandHandler("shop", cmd_shop))
-                app.add_handler(CommandHandler("balance", cmd_balance))
-                app.add_handler(CommandHandler("orders", cmd_orders))
-                app.add_handler(CommandHandler("support", cmd_support))
-                app.add_handler(CallbackQueryHandler(callback_handler))
-                app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-                app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
-                app.add_handler(MessageHandler(
-                    filters.TEXT & ~filters.COMMAND, message_handler))
-                await app.initialize()
-                await app.bot.set_my_commands([
-                    BotCommand("start", "Main menu"),
-                    BotCommand("shop", "Browse products"),
-                    BotCommand("balance", "Balance / top up"),
-                    BotCommand("orders", "My orders"),
-                    BotCommand("support", "Contact support"),
-                ])
-                _application = app
-    return _application
+    global _application, _application_loop
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN environment variable is not set")
 
+    current_loop = asyncio.get_running_loop()
 
-async def handle_telegram_update(body):
-    try:
-        app = await get_application()
-        update = Update.de_json(body, app.bot)
-        await app.process_update(update)
-    except Exception as e:
-        logger.exception("Telegram error: %s", e)
-    return PlainTextResponse("OK")
+    if _application is not None and _application_loop is current_loop:
+        return _application
+
+    async with _get_lock():
+        if _application is not None and _application_loop is current_loop:
+            return _application
+
+        app = Application.builder().token(TOKEN).build()
+        app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("shop", cmd_shop))
+        app.add_handler(CommandHandler("balance", cmd_balance))
+        app.add_handler(CommandHandler("orders", cmd_orders))
+        app.add_handler(CommandHandler("support", cmd_support))
+        app.add_handler(CallbackQueryHandler(callback_handler))
+        app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+        app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, message_handler))
+
+        await app.initialize()
+        try:
+            await app.bot.set_my_commands([
+                BotCommand("start", "Main menu"),
+                BotCommand("shop", "Browse products"),
+                BotCommand("balance", "Balance / top up"),
+                BotCommand("orders", "My orders"),
+                BotCommand("support", "Contact support"),
+            ])
+        except Exception as e:
+            logger.warning("set_my_commands failed: %s", e)
+
+        _application = app
+        _application_loop = current_loop
+        return app
 
 
 # ─────────────────────────────────────────────────────────────
-# Admin API dispatch (called from POST /api/webhook with {action})
+# Lazy DB init
+# ─────────────────────────────────────────────────────────────
+_db_ready = False
+
+
+async def _ensure_db():
+    global _db_ready
+    if _db_ready:
+        return
+    await asyncio.to_thread(init_db)
+    _db_ready = True
+
+
+# ─────────────────────────────────────────────────────────────
+# Dispatch: admin API actions
 # ─────────────────────────────────────────────────────────────
 async def dispatch_admin(action, body):
     if action == "stats":
@@ -1107,7 +1139,7 @@ async def dispatch_admin(action, body):
 
 
 # ─────────────────────────────────────────────────────────────
-# Basic Auth check
+# Basic Auth
 # ─────────────────────────────────────────────────────────────
 def check_auth(request):
     auth = request.headers.get("authorization", "")
@@ -1122,13 +1154,13 @@ def check_auth(request):
 
 
 def auth_challenge():
-    return Response(
+    return PlainTextResponse(
         "Authentication required", status_code=401,
         headers={"WWW-Authenticate": 'Basic realm="Shop Admin"'})
 
 
 # ─────────────────────────────────────────────────────────────
-# Admin HTML
+# Admin HTML (single-page)
 # ─────────────────────────────────────────────────────────────
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -1483,7 +1515,7 @@ async function loadSettings() {
   } else if (qr.type === 'b64') {
     el.innerHTML = `<img src="data:image/png;base64,${qr.value}" class="qr-preview">`;
   } else {
-    el.innerHTML = '<div class="muted">QR set via Telegram (file_id). Upload a new one to preview here.</div>';
+    el.innerHTML = '<div class="muted">QR set via Telegram. Upload a new one to preview here.</div>';
   }
 }
 
@@ -1532,9 +1564,61 @@ loadDashboard();
 
 
 # ─────────────────────────────────────────────────────────────
-# Main endpoint (handles webhook + admin API + HTML)
+# Debug endpoint
+# ─────────────────────────────────────────────────────────────
+async def debug_handler(request):
+    try:
+        import telegram
+        ptb_version = getattr(telegram, "__version__", "unknown")
+    except Exception as e:
+        ptb_version = f"ERROR: {e}"
+    try:
+        import starlette
+        starlette_version = getattr(starlette, "__version__", "unknown")
+    except Exception as e:
+        starlette_version = f"ERROR: {e}"
+
+    app_status = "not initialized"
+    app_error = None
+    try:
+        await get_application()
+        app_status = "ok"
+    except Exception as e:
+        app_status = "error"
+        app_error = str(e)
+
+    return JSONResponse({
+        "status": "ok",
+        "python": sys.version.split()[0],
+        "ptb_version": ptb_version,
+        "starlette_version": starlette_version,
+        "bot_token_set": bool(TOKEN),
+        "admin_ids": ADMIN_IDS,
+        "admin_panel_user": ADMIN_PANEL_USER,
+        "admin_panel_pass_customized": ADMIN_PANEL_PASS != "changeme",
+        "db_path": DB_PATH,
+        "db_exists": os.path.exists(DB_PATH),
+        "db_ready": _db_ready,
+        "tg_app_status": app_status,
+        "tg_app_error": app_error,
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Main webhook entry (all routing goes through here)
 # ─────────────────────────────────────────────────────────────
 async def webhook_entry(request):
+    # Debug endpoint (via ?action=debug from vercel.json rewrite)
+    if request.query_params.get("action") == "debug":
+        return await debug_handler(request)
+
+    # Ensure DB is ready
+    try:
+        await _ensure_db()
+    except Exception as e:
+        logger.exception("DB init failed")
+        return PlainTextResponse(f"DB init failed: {e}", status_code=500)
+
     if request.method == "GET":
         if not check_auth(request):
             return auth_challenge()
@@ -1548,20 +1632,34 @@ async def webhook_entry(request):
 
     # Telegram update?
     if "update_id" in body:
-        return await handle_telegram_update(body)
+        try:
+            app = await get_application()
+            update = Update.de_json(body, app.bot)
+            await app.process_update(update)
+        except Exception as e:
+            logger.exception("Telegram update failed")
+            # Still return 200 so Telegram doesn't retry endlessly
+            return PlainTextResponse(f"OK (error logged: {e})")
+        return PlainTextResponse("OK")
 
     # Admin API call
     if not check_auth(request):
         return auth_challenge()
 
     action = body.get("action", "")
-    return await dispatch_admin(action, body)
+    try:
+        return await dispatch_admin(action, body)
+    except Exception as e:
+        logger.exception("Admin action failed: %s", action)
+        return JSONResponse({"error": str(e), "action": action}, status_code=500)
 
 
+# ─────────────────────────────────────────────────────────────
+# ASGI app
+# ─────────────────────────────────────────────────────────────
 app = Starlette(routes=[
     Route("/", endpoint=webhook_entry, methods=["GET", "POST"]),
     Route("/admin", endpoint=webhook_entry, methods=["GET"]),
     Route("/api/webhook", endpoint=webhook_entry, methods=["GET", "POST"]),
+    Route("/debug", endpoint=debug_handler, methods=["GET"]),
 ])
-
-init_db()
