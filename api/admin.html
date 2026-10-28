@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shop Admin</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+header { background: #1e293b; padding: 1rem 1.5rem; display: flex; justify-content: space-between; align-items: center; }
+h1 { margin: 0; font-size: 1.25rem; }
+nav { display: flex; gap: 0.5rem; flex-wrap: wrap; padding: 1rem; background: #1e293b; }
+button { background: #334155; color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; }
+button:hover { background: #475569; }
+button.active { background: #0ea5e9; }
+main { padding: 1.5rem; max-width: 1200px; margin: 0 auto; }
+.card { background: #1e293b; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 0.5rem; text-align: left; border-bottom: 1px solid #334155; }
+input, textarea, select { background: #0f172a; color: #fff; border: 1px solid #334155; padding: 0.5rem; border-radius: 4px; width: 100%; box-sizing: border-box; }
+.row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+.row > * { flex: 1; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1rem; }
+.stat { background: #1e293b; padding: 1rem; border-radius: 8px; text-align: center; }
+.stat b { display: block; font-size: 1.5rem; color: #38bdf8; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Shop Admin</h1>
+  <span id="status">Loading…</span>
+</header>
+<nav>
+  <button onclick="show('stats')" class="active" id="btn-stats">Stats</button>
+  <button onclick="show('products')" id="btn-products">Products</button>
+  <button onclick="show('stock')" id="btn-stock">Stock</button>
+  <button onclick="show('orders')" id="btn-orders">Orders</button>
+  <button onclick="show('users')" id="btn-users">Users</button>
+  <button onclick="show('topups')" id="btn-topups">Top-ups</button>
+  <button onclick="show('settings')" id="btn-settings">Settings</button>
+</nav>
+<main id="content"></main>
+
+<script>
+const API = window.location.pathname.includes('/admin') ? '/' : '/api/webhook';
+
+async function api(action, data = {}) {
+  const res = await fetch(API, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, ...data })
+  });
+  if (res.status === 401) {
+    document.getElementById('status').textContent = 'Auth required — refresh and login';
+    throw new Error('Unauthorized');
+  }
+  return res.json();
+}
+
+function show(tab) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('btn-' + tab).classList.add('active');
+  const c = document.getElementById('content');
+  c.innerHTML = '<p>Loading…</p>';
+  if (tab === 'stats') loadStats();
+  else if (tab === 'products') loadProducts();
+  else if (tab === 'stock') loadStock();
+  else if (tab === 'orders') loadOrders();
+  else if (tab === 'users') loadUsers();
+  else if (tab === 'topups') loadTopups();
+  else if (tab === 'settings') loadSettings();
+}
+
+async function loadStats() {
+  const d = await api('stats');
+  document.getElementById('content').innerHTML = `
+    <div class="stats">
+      <div class="stat"><b>${d.users ?? 0}</b>Users</div>
+      <div class="stat"><b>${d.products ?? 0}</b>Products</div>
+      <div class="stat"><b>${d.orders ?? 0}</b>Orders</div>
+      <div class="stat"><b>${d.pending_topups ?? 0}</b>Pending Top-ups</div>
+      <div class="stat"><b>${(d.revenue ?? 0).toFixed?.(2) ?? d.revenue}</b>Revenue</div>
+    </div>`;
+  document.getElementById('status').textContent = 'OK';
+}
+
+async function loadProducts() {
+  const rows = await api('products_list');
+  let html = `<div class="card">
+    <h3>Add Product</h3>
+    <div class="row"><input id="p-name" placeholder="Name"><input id="p-price" type="number" step="0.01" placeholder="Price"></div>
+    <textarea id="p-desc" placeholder="Description" rows="2"></textarea>
+    <button onclick="addProduct()">Add</button>
+  </div><div class="card"><table><tr><th>ID</th><th>Name</th><th>Price</th><th>Active</th><th></th></tr>`;
+  (rows || []).forEach(p => {
+    html += `<tr><td>${p.id}</td><td>${p.name}</td><td>${p.price}</td><td>${p.is_active ? 'Yes' : 'No'}</td>
+      <td><button onclick="toggleProduct(${p.id}, ${!p.is_active})">${p.is_active ? 'Disable' : 'Enable'}</button>
+          <button onclick="delProduct(${p.id})">Delete</button></td></tr>`;
+  });
+  html += '</table></div>';
+  document.getElementById('content').innerHTML = html;
+}
+
+async function addProduct() {
+  const name = document.getElementById('p-name').value;
+  const price = document.getElementById('p-price').value;
+  const description = document.getElementById('p-desc').value;
+  await api('product_add', { name, price, description });
+  loadProducts();
+}
+async function delProduct(id) { if (confirm('Delete?')) { await api('product_delete', { id }); loadProducts(); } }
+async function toggleProduct(id, is_active) { await api('product_toggle', { id, is_active }); loadProducts(); }
+
+async function loadStock() {
+  const rows = await api('stock_list');
+  let html = `<div class="card"><h3>Add Stock</h3>
+    <div class="row"><input id="s-pid" type="number" placeholder="Product ID"><textarea id="s-items" placeholder="One item per line" rows="3"></textarea></div>
+    <button onclick="addStock()">Add Items</button></div>
+    <div class="card"><table><tr><th>Product</th><th>Available</th><th>Sold</th></tr>`;
+  (rows || []).forEach(s => {
+    html += `<tr><td>${s.product_name} (#${s.product_id})</td><td>${s.available}</td><td>${s.sold}</td></tr>`;
+  });
+  html += '</table></div>';
+  document.getElementById('content').innerHTML = html;
+}
+async function addStock() {
+  const product_id = +document.getElementById('s-pid').value;
+  const items = document.getElementById('s-items').value.split('\n').map(x => x.trim()).filter(Boolean);
+  await api('stock_add', { product_id, items });
+  loadStock();
+}
+
+async function loadOrders() {
+  const rows = await api('orders_list');
+  let html = '<div class="card"><table><tr><th>ID</th><th>User</th><th>Product</th><th>Amount</th><th>Status</th><th>Date</th></tr>';
+  (rows || []).forEach(o => {
+    html += `<tr><td>${o.id}</td><td>${o.user_id}</td><td>${o.product_name || o.product_id}</td><td>${o.amount}</td><td>${o.status}</td><td>${o.created_at || ''}</td></tr>`;
+  });
+  html += '</table></div>';
+  document.getElementById('content').innerHTML = html;
+}
+
+async function loadUsers() {
+  const rows = await api('users_list');
+  let html = '<div class="card"><table><tr><th>ID</th><th>Username</th><th>Balance</th><th>Joined</th></tr>';
+  (rows || []).forEach(u => {
+    html += `<tr><td>${u.user_id}</td><td>${u.username || '-'}</td><td>${u.balance}</td><td>${u.created_at || ''}</td></tr>`;
+  });
+  html += '</table></div>';
+  document.getElementById('content').innerHTML = html;
+}
+
+async function loadTopups() {
+  const rows = await api('topups_list');
+  let html = '<div class="card"><table><tr><th>ID</th><th>User</th><th>Amount</th><th>Status</th><th></th></tr>';
+  (rows || []).forEach(t => {
+    html += `<tr><td>${t.id}</td><td>${t.user_id}</td><td>${t.amount}</td><td>${t.status}</td>
+      <td>${t.status === 'awaiting_payment' || t.status === 'pending' ? `<button onclick="approveTopup(${t.id})">Approve</button> <button onclick="rejectTopup(${t.id})">Reject</button>` : ''}</td></tr>`;
+  });
+  html += '</table></div>';
+  document.getElementById('content').innerHTML = html;
+}
+async function approveTopup(id) { await api('topup_approve', { id }); loadTopups(); }
+async function rejectTopup(id) { await api('topup_reject', { id }); loadTopups(); }
+
+async function loadSettings() {
+  const d = await api('settings_get');
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <h3>Settings</h3>
+      <label>Welcome message</label>
+      <textarea id="welcome" rows="3">${d.welcome_message || ''}</textarea>
+      <label>Support contact</label>
+      <input id="support" value="${d.support_contact || ''}">
+      <br><br>
+      <button onclick="saveSettings()">Save</button>
+    </div>
+    <div class="card">
+      <h3>Broadcast</h3>
+      <textarea id="bcast" rows="3" placeholder="Message to all users"></textarea>
+      <button onclick="broadcast()">Send</button>
+    </div>`;
+}
+async function saveSettings() {
+  await api('settings_save', {
+    welcome_message: document.getElementById('welcome').value,
+    support_contact: document.getElementById('support').value
+  });
+  alert('Saved');
+}
+async function broadcast() {
+  const message = document.getElementById('bcast').value;
+  if (!message || !confirm('Send to all users?')) return;
+  const r = await api('broadcast', { message });
+  alert(r.ok ? 'Sent' : (r.error || 'Done'));
+}
+
+show('stats');
+</script>
+</body>
+</html>
