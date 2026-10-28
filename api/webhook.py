@@ -4,7 +4,7 @@ import json
 import logging
 
 # ─────────────────────────────────────────────────────────────
-# Logging FIRST (before anything can fail)
+# Logging FIRST
 # ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -17,7 +17,6 @@ logger = logging.getLogger("shop-bot")
 # ─────────────────────────────────────────────────────────────
 _boot_errors = {}
 
-# Stdlib (always available)
 try:
     import asyncio
     import sqlite3
@@ -29,23 +28,24 @@ except Exception as e:
     _boot_errors["stdlib"] = repr(e)
     _STDLIB_OK = False
 
-# Config — MUST be set via environment variables on Vercel
-TOKEN = os.environ.get("BOT_TOKEN", "8807189325:AAGDQxllEFXBz4deVtKyBiHwb0quAxTSJhE").strip()
+TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ADMIN_IDS = [
     int(x.strip())
-    for x in os.environ.get("ADMIN_IDS", "8430063155").split(",")
+    for x in os.environ.get("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
 ]
 ADMIN_PANEL_USER = os.environ.get("ADMIN_PANEL_USER", "admin").strip()
-ADMIN_PANEL_PASS = os.environ.get("ADMIN_PANEL_PASS", "168168").strip()
-DB_PATH = "/tmp/shop.db"
+ADMIN_PANEL_PASS = os.environ.get("ADMIN_PANEL_PASS", "").strip()
+
+# ⚠️ FIX: /tmp is ephemeral on Vercel. For production use an external DB.
+#          Kept here so nothing breaks, but data resets on cold start.
+DB_PATH = os.environ.get("DB_PATH", "/tmp/shop.db")
 
 if not TOKEN:
     logger.error("BOT_TOKEN environment variable is not set")
 if not ADMIN_PANEL_PASS:
     logger.error("ADMIN_PANEL_PASS environment variable is not set")
 
-# Starlette
 try:
     from starlette.applications import Starlette
     from starlette.responses import (
@@ -57,7 +57,6 @@ except Exception as e:
     _boot_errors["starlette"] = repr(e)
     _HAS_STARLETTE = False
 
-# Telegram
 try:
     from telegram import (
         Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -81,9 +80,6 @@ else:
     logger.error("BOOT FAILED: %s", _boot_errors)
 
 
-# ─────────────────────────────────────────────────────────────
-# Fallback ASGI (used only if boot failed)
-# ─────────────────────────────────────────────────────────────
 async def _fallback_asgi(scope, receive, send):
     if scope["type"] != "http":
         return
@@ -91,7 +87,7 @@ async def _fallback_asgi(scope, receive, send):
         "status": "boot_failed",
         "errors": _boot_errors,
         "hint": (
-            "requirements.txt must be at project root with: "
+            "pyproject.toml [project].dependencies must include: "
             "python-telegram-bot>=21.6,<22 and starlette>=0.37,<1.0"
         ),
     }, indent=2).encode()
@@ -106,9 +102,6 @@ async def _fallback_asgi(scope, receive, send):
     await send({"type": "http.response.body", "body": body})
 
 
-# ─────────────────────────────────────────────────────────────
-# Build the full app (only runs if boot OK)
-# ─────────────────────────────────────────────────────────────
 def build_app():
     # ═════════════════════════════════════════════
     # Database
@@ -1023,24 +1016,29 @@ def build_app():
             return
 
     # ═════════════════════════════════════════════
-    # Telegram Application (lazy + loop-aware)
+    # ⚠️ FIXED: Telegram Application with correct
+    #           lock-per-loop handling + started flag
     # ═════════════════════════════════════════════
     _tg_app = None
     _tg_loop = None
+    _tg_started = False
     _lock = None
+    _lock_loop = None  # ⚠️ NEW: track loop the lock belongs to
 
     def _get_lock():
-        nonlocal _lock
+        nonlocal _lock, _lock_loop
         try:
             cur = asyncio.get_running_loop()
         except RuntimeError:
             cur = None
-        if _lock is None:
+        # ⚠️ If loop changed, the old lock is bound to a dead loop — recreate
+        if _lock is None or _lock_loop is not cur:
             _lock = asyncio.Lock()
+            _lock_loop = cur
         return _lock
 
     async def get_tg_app():
-        nonlocal _tg_app, _tg_loop
+        nonlocal _tg_app, _tg_loop, _tg_started
         if not TOKEN:
             raise RuntimeError("BOT_TOKEN environment variable is not set")
 
@@ -1067,6 +1065,8 @@ def build_app():
                 filters.TEXT & ~filters.COMMAND, message_handler))
 
             await app.initialize()
+            # ⚠️ NEW: start the update processor (required for process_update)
+            await app.start()
             try:
                 await app.bot.set_my_commands([
                     BotCommand("start", "Main menu"),
@@ -1080,6 +1080,8 @@ def build_app():
 
             _tg_app = app
             _tg_loop = cur_loop
+            _tg_started = True
+            logger.info("Telegram Application initialized on loop %s", cur_loop)
             return app
 
     # ═════════════════════════════════════════════
@@ -1345,13 +1347,16 @@ def build_app():
         except Exception:
             return PlainTextResponse("Bad request", status_code=400)
 
+        # Telegram update — MUST be processed before auth check
         if "update_id" in body:
             try:
                 app = await get_tg_app()
                 update = Update.de_json(body, app.bot)
                 await app.process_update(update)
+                logger.info("Processed update %s", body.get("update_id"))
             except Exception as e:
                 logger.exception("Telegram update failed: %s", e)
+                # Return 200 anyway so Telegram doesn't retry forever
             return PlainTextResponse("OK")
 
         if not check_auth(request):
@@ -1374,9 +1379,6 @@ def build_app():
     ])
 
 
-# ═════════════════════════════════════════════════════════════
-# The admin HTML panel (unchanged from previous version)
-# ═════════════════════════════════════════════════════════════
 ADMIN_HTML = open(
     os.path.join(os.path.dirname(__file__), "admin.html")
 ).read() if os.path.exists(
@@ -1384,9 +1386,6 @@ ADMIN_HTML = open(
 ) else "<h1>admin.html missing</h1>"
 
 
-# ═════════════════════════════════════════════════════════════
-# Boot
-# ═════════════════════════════════════════════════════════════
 try:
     app = build_app() if BOOT_OK else _fallback_asgi
     logger.info("App ready: %s", type(app).__name__)
