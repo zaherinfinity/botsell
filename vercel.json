@@ -4,5 +4,9 @@
     "api/webhook.py": {
       "maxDuration": 60
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/", "destination": "/api/webhook" },
+    { "source": "/admin", "destination": "/api/webhook" }
+  ]
 }
