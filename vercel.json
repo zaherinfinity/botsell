@@ -8,7 +8,6 @@
   "rewrites": [
     { "source": "/", "destination": "/api/webhook" },
     { "source": "/admin", "destination": "/api/webhook" },
-    { "source": "/admin/:path*", "destination": "/api/webhook" },
     { "source": "/debug", "destination": "/api/webhook?action=debug" }
   ]
 }
