@@ -29,16 +29,21 @@ except Exception as e:
     _boot_errors["stdlib"] = repr(e)
     _STDLIB_OK = False
 
-# Config
-TOKEN = os.environ.get("BOT_TOKEN", "8807189325:AAGDQxllEFXBz4deVtKyBiHwb0quAxTSJhE")
+# Config — MUST be set via environment variables on Vercel
+TOKEN = os.environ.get("BOT_TOKEN", "8807189325:AAGDQxllEFXBz4deVtKyBiHwb0quAxTSJhE").strip()
 ADMIN_IDS = [
     int(x.strip())
     for x in os.environ.get("ADMIN_IDS", "8430063155").split(",")
     if x.strip().isdigit()
 ]
-ADMIN_PANEL_USER = os.environ.get("ADMIN_PANEL_USER", "admin")
-ADMIN_PANEL_PASS = os.environ.get("ADMIN_PANEL_PASS", "168168")
+ADMIN_PANEL_USER = os.environ.get("ADMIN_PANEL_USER", "admin").strip()
+ADMIN_PANEL_PASS = os.environ.get("ADMIN_PANEL_PASS", "168168").strip()
 DB_PATH = "/tmp/shop.db"
+
+if not TOKEN:
+    logger.error("BOT_TOKEN environment variable is not set")
+if not ADMIN_PANEL_PASS:
+    logger.error("ADMIN_PANEL_PASS environment variable is not set")
 
 # Starlette
 try:
